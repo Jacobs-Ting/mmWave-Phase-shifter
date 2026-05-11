@@ -27,19 +27,30 @@ iq_mismatch_percent = st.sidebar.slider("I/Q Gain Imbalance (+/- %)", 0, 80, 40)
 
 st.sidebar.divider()
 st.sidebar.header("🎛️ Digital-to-Analog Converter (DAC)")
-dac_bits = st.sidebar.slider("DAC Resolution (Bits)", min_value=2, max_value=10, value=4, help="Determines the density of the control grid. e.g., 4-bit has 16 levels.")
+dac_bits = st.sidebar.slider("DAC Resolution (Bits)", min_value=2, max_value=12, value=8, help="Determines the density of the control grid.")
 dac_levels = 2 ** dac_bits
 dac_lsb = 2.0 / (dac_levels - 1)
 st.sidebar.caption(f"Current LSB Step: **{dac_lsb:.4f} V**")
 
 st.sidebar.divider()
 st.sidebar.header("🎯 Target Beam")
-target_theta = st.sidebar.slider("Theta $\\theta$ (Elevation)", -60, 60, 45)
+target_theta = st.sidebar.slider("Theta $\\theta$ (Elevation)", -60, 60, 60)
 target_phi = st.sidebar.slider("Phi $\\phi$ (Azimuth)", 0, 360, 0)
 
 def reset_calibration():
     st.session_state.is_calibrated = False
 st.sidebar.button("🔄 Reset Hardware State", on_click=reset_calibration)
+
+# --- Helper Function: Voltage to Hex Code ---
+def volt_to_hex(v, bits):
+    """Maps voltage [-1, 1] to integer [0, 2^bits-1] then to Hex string"""
+    max_val = (2 ** bits) - 1
+    # Normalize and clip
+    v_norm = (v + 1.0) / 2.0
+    code_int = int(np.clip(np.round(v_norm * max_val), 0, max_val))
+    # Dynamic hex length based on bits (e.g., 8-bit = 2 chars, 12-bit = 3 chars)
+    hex_len = int(np.ceil(bits / 4))
+    return f"0x{format(code_int, f'0{hex_len}X')}"
 
 # --- Quantization Function ---
 def quantize_voltage(v, lsb):
@@ -120,7 +131,7 @@ tab_intro, tab_const, tab_err, tab_cb = st.tabs([
     "📖 System Architecture & Principles", 
     "📐 Quantization Grid & Constellation", 
     "📊 Phase & Amplitude Errors", 
-    "🗂️ Quantized Codebook"
+    "🗂️ NV Codebook"
 ])
 
 # ==========================================
@@ -167,8 +178,8 @@ with tab_intro:
     st.subheader("3. The Ultimate Bottleneck: Cartesian Quantization")
     st.markdown("""
     In ideal math, the calculated voltages are continuous floating-point numbers. However, VGAs are driven by finite-resolution **Digital-to-Analog Converters (DACs)**.
-    * **Square Grid Constraint:** A 4-bit DAC forces control voltages onto the intersections of a $16 \times 16$ discrete square grid.
-    * **Parasitic AM Effect:** To approximate the target phase on this grid, amplitude is often sacrificed. This creates unpredictable **Amplitude Ripple**, destroying pre-defined array tapering (e.g., Taylor Window).
+    * **Square Grid Constraint:** A finite-bit DAC forces control voltages onto the intersections of a discrete square grid.
+    * **Parasitic AM Effect:** To approximate the target phase on this grid, amplitude is often sacrificed. This creates unpredictable **Amplitude Ripple**, destroying pre-defined array tapering.
     * **Saturation Clipping:** If the pre-compensation demands a voltage exceeding the DAC's rail limits ($\pm 1.0\text{V}$), the signal is forcibly clipped, leading to beam collapse.
     """)
 
@@ -183,7 +194,6 @@ with tab_const:
         st.subheader("📐 VM Phase Shifter: I/Q Cartesian Grid")
         st.markdown("**Blue Dots**: Exact ideal DPD values. **Red Stars**: Quantized voltages forced by DAC limits.")
         
-        # Make figure background transparent to blend with Streamlit dark mode
         fig_const, ax_const = plt.subplots(figsize=(8, 8))
         fig_const.patch.set_alpha(0.0) 
         ax_const.patch.set_alpha(0.0)
@@ -259,31 +269,33 @@ with tab_err:
         st.pyplot(fig_err)
 
 # ==========================================
-# Tab 3: Quantized Codebook (Heatmap Style)
+# Tab 3: NV Codebook (Hex Conversion)
 # ==========================================
 with tab_cb:
     if not st.session_state.is_calibrated:
         st.info("👆 Please click the 'Execute Quantized Pre-compensation' button on the sidebar.")
     else:
         cal_data = st.session_state.calibrated_data
-        st.subheader("🗂️ Quantized Codebook for NV Memory")
-        st.markdown("The table below shows the conversion from floating-point exact values to real DAC digital codes, mimicking the thermal/heatmap view.")
+        st.subheader("🗂️ Hex-Encoded Quantized Codebook for NV Memory")
+        st.markdown("The table below shows the conversion from floating-point exact values to real DAC digital codes. **The 'NV_Code' columns represent the actual Hexadecimal values written to the chip's memory.**")
         
         comparison_data = []
         for i in range(num_elements):
+            q_i_volt = cal_data['q_I'][i]
+            q_q_volt = cal_data['q_Q'][i]
+            
             comparison_data.append({
                 "Antenna": f"TX_{i}",
-                "Hardware G_I": round(true_gains_I[i], 6),
-                "Hardware G_Q": round(true_gains_Q[i], 6),
                 "Exact DPD_I": round(cal_data['exact_I'][i], 6),
-                "Quantized DAC_I": round(cal_data['q_I'][i], 6),
+                "Quantized DAC_I": round(q_i_volt, 6),
+                "NV_Code_I (Hex)": volt_to_hex(q_i_volt, dac_bits),
                 "Exact DPD_Q": round(cal_data['exact_Q'][i], 6),
-                "Quantized DAC_Q": round(cal_data['q_Q'][i], 6)
+                "Quantized DAC_Q": round(q_q_volt, 6),
+                "NV_Code_Q (Hex)": volt_to_hex(q_q_volt, dac_bits)
             })
         
         df_comp = pd.DataFrame(comparison_data)
         
-        # Apply the gradient styling to match the screenshot aesthetics
         styled_df = df_comp.style.background_gradient(subset=['Quantized DAC_I'], cmap='Oranges') \
                                  .background_gradient(subset=['Quantized DAC_Q'], cmap='Greys')
         
